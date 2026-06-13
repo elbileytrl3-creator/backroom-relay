@@ -16,6 +16,14 @@ const httpServer = http.createServer((req, res) => {
 
 const wss = new WebSocket.Server({ server: httpServer });
 
+// Préfixe chaque message avec sa longueur (2 bytes LE) pour un framing fiable
+function sendFramed(ws, buf) {
+    const out = Buffer.allocUnsafe(2 + buf.length);
+    out.writeUInt16LE(buf.length, 0);
+    buf.copy(out, 2);
+    ws.send(out);
+}
+
 wss.on('connection', ws => {
     ws._room   = null;
     ws._isHost = false;
@@ -29,11 +37,11 @@ wss.on('connection', ws => {
         if (type === 0x01) {                          // HOST REGISTER
             if (buf.length < 7) return;
             const code = buf.slice(1, 7).toString('ascii');
-            if (rooms.has(code)) { ws.send(Buffer.from([0xE1])); return; }
+            if (rooms.has(code)) { sendFramed(ws, Buffer.from([0xE1])); return; }
             ws._isHost = true;
             ws._room   = code;
             rooms.set(code, { host: ws, clients: new Map(), nextId: 1 });
-            ws.send(Buffer.from([0xA0]));
+            sendFramed(ws, Buffer.from([0xA0]));
             console.log(`[+] Salon : ${code}`);
         }
 
@@ -41,14 +49,14 @@ wss.on('connection', ws => {
             if (buf.length < 7) return;
             const code = buf.slice(1, 7).toString('ascii');
             const room = rooms.get(code);
-            if (!room) { ws.send(Buffer.from([0xE2])); return; }
+            if (!room) { sendFramed(ws, Buffer.from([0xE2])); return; }
             const id = room.nextId++;
             ws._isHost = false;
             ws._room   = code;
             ws._id     = id;
             room.clients.set(id, ws);
-            ws.send(Buffer.from([0xA0, id]));
-            room.host.send(Buffer.from([0xA1, id]));
+            sendFramed(ws, Buffer.from([0xA0, id]));
+            sendFramed(room.host, Buffer.from([0xA1, id]));
             console.log(`[+] Client ${id} → ${code}`);
         }
 
@@ -61,7 +69,7 @@ wss.on('connection', ws => {
                 const fwd = Buffer.allocUnsafe(buf.length - 1);
                 fwd[0] = 0xA3;
                 buf.copy(fwd, 1, 2);
-                target.send(fwd);
+                sendFramed(target, fwd);
             }
         }
 
@@ -73,7 +81,7 @@ wss.on('connection', ws => {
             fwd[0] = 0xA3;
             fwd[1] = ws._id;
             buf.copy(fwd, 2, 1);
-            room.host.send(fwd);
+            sendFramed(room.host, fwd);
         }
     });
 
@@ -83,14 +91,14 @@ wss.on('connection', ws => {
         if (!room) return;
         if (ws._isHost) {
             room.clients.forEach(c => {
-                if (c.readyState === WebSocket.OPEN) c.send(Buffer.from([0xA2, 0xFF]));
+                if (c.readyState === WebSocket.OPEN) sendFramed(c, Buffer.from([0xA2, 0xFF]));
             });
             rooms.delete(ws._room);
             console.log(`[-] Salon fermé : ${ws._room}`);
         } else {
             room.clients.delete(ws._id);
             if (room.host.readyState === WebSocket.OPEN)
-                room.host.send(Buffer.from([0xA2, ws._id]));
+                sendFramed(room.host, Buffer.from([0xA2, ws._id]));
         }
     });
 
